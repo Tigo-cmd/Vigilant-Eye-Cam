@@ -222,7 +222,7 @@ const DrowsinessDetector: React.FC = () => {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Camera className="h-5 w-5" />
-            Vigilant Eye Cam
+            Anti-Sleep Alert System For Drivers
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -256,6 +256,20 @@ const DrowsinessDetector: React.FC = () => {
       </Card>
 
       <canvas ref={canvasRef} className="hidden" width={CAPTURE_WIDTH} height={CAPTURE_HEIGHT} />
+      {/* Instructions */}
+      <Card className="w-full">
+        <CardContent className="pt-6">
+          <div className="text-sm text-muted-foreground space-y-2">
+            <p><strong>Instructions:</strong></p>
+            <ul className="list-disc list-inside space-y-1">
+              <li>The system captures frames every second and analyzes them for drowsiness</li>
+              <li>A warning will appear if drowsiness is detected</li>
+              <li>The alarm sound can be toggled on/off using the button</li>
+              <li>Grant camera permissions when prompted</li>
+            </ul>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 };
