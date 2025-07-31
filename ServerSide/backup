@@ -1,0 +1,269 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { AlertTriangle, Camera, RefreshCw, Volume2, Play, Pause } from 'lucide-react';
+
+// Configuration constants
+const BACKEND_URL = 'http://localhost:5000/detect';
+const CAPTURE_INTERVAL = 1000; // 1 second
+const CAPTURE_WIDTH = 320;
+const CAPTURE_HEIGHT = 240;
+const MAX_RETRIES = 2;
+const RETRY_DELAY = 1000;
+
+interface DetectionResult {
+  drowsy: boolean;
+  confidence: number;
+}
+
+interface CameraError {
+  type: 'permission' | 'device' | 'unknown';
+  message: string;
+}
+
+class AlarmSound {
+  private audioContext: AudioContext | null = null;
+  private isPlaying = false;
+  private oscillators: OscillatorNode[] = [];
+
+  constructor() {
+    try {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    } catch (e) {
+      console.warn('[AlarmSound] Web Audio API not supported.');
+    }
+  }
+
+  play() {
+    if (!this.audioContext || this.isPlaying) return;
+    this.isPlaying = true;
+    this.createAlarm();
+  }
+
+  stop() {
+    this.isPlaying = false;
+    this.oscillators.forEach(osc => {
+      try { osc.stop(); } catch {}
+    });
+    this.oscillators = [];
+  }
+
+  private createAlarm() {
+    if (!this.audioContext || !this.isPlaying) return;
+    const freqs = [800, 1000];
+    const duration = 0.3;
+
+    freqs.forEach((freq, idx) => {
+      setTimeout(() => {
+        if (!this.isPlaying) return;
+
+        const osc = this.audioContext!.createOscillator();
+        const gain = this.audioContext!.createGain();
+
+        osc.connect(gain);
+        gain.connect(this.audioContext!.destination);
+
+        osc.frequency.setValueAtTime(freq, this.audioContext!.currentTime);
+        osc.type = 'sine';
+
+        gain.gain.setValueAtTime(0, this.audioContext!.currentTime);
+        gain.gain.linearRampToValueAtTime(0.1, this.audioContext!.currentTime + 0.05);
+        gain.gain.linearRampToValueAtTime(0, this.audioContext!.currentTime + duration);
+
+        osc.start();
+        osc.stop(this.audioContext!.currentTime + duration);
+        this.oscillators.push(osc);
+      }, idx * 400);
+    });
+
+    setTimeout(() => this.createAlarm(), 1000);
+  }
+}
+
+const DrowsinessDetector: React.FC = () => {
+  const [isActive, setIsActive] = useState(false);
+  const [drowsy, setDrowsy] = useState(false);
+  const [confidence, setConfidence] = useState(0);
+  const [error, setError] = useState<CameraError | null>(null);
+  const [showWarning, setShowWarning] = useState(false);
+  const [alarmEnabled, setAlarmEnabled] = useState(true);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const alarmRef = useRef<AlarmSound>(new AlarmSound());
+
+  const initializeCamera = useCallback(async () => {
+    try {
+      setError(null);
+      setIsProcessing(true);
+
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        streamRef.current = stream;
+
+        await videoRef.current.play();
+        setIsActive(true);
+        captureAndAnalyze(); // Initial quick send
+        intervalRef.current = setInterval(captureAndAnalyze, CAPTURE_INTERVAL);
+      }
+    } catch (err: any) {
+      let message = 'Unknown error';
+      let type: CameraError['type'] = 'unknown';
+      if (err.name === 'NotAllowedError') {
+        type = 'permission';
+        message = 'Camera access denied.';
+      } else if (err.name === 'NotFoundError') {
+        type = 'device';
+        message = 'No camera found.';
+      }
+      setError({ type, message });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, []);
+
+  const stopDetection = useCallback(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    if (abortRef.current) abortRef.current.abort();
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
+
+    alarmRef.current.stop();
+    setIsActive(false);
+    setShowWarning(false);
+  }, []);
+
+  const resetDetector = useCallback(() => {
+    stopDetection();
+    setError(null);
+    setDrowsy(false);
+    setConfidence(0);
+    setShowWarning(false);
+  }, [stopDetection]);
+
+  const captureAndAnalyze = useCallback(async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const ctx = canvasRef.current.getContext('2d');
+    if (!ctx) return;
+
+    canvasRef.current.width = CAPTURE_WIDTH;
+    canvasRef.current.height = CAPTURE_HEIGHT;
+    ctx.drawImage(videoRef.current, 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT);
+
+    const blob = await new Promise<Blob | null>(resolve => {
+      canvasRef.current!.toBlob(b => resolve(b), 'image/jpeg', 0.8);
+    });
+    if (blob) await sendToBackend(blob);
+  }, []);
+
+  const sendToBackend = async (blob: Blob, retry = 0) => {
+    try {
+      abortRef.current = new AbortController();
+      const res = await fetch(BACKEND_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: blob,
+        signal: abortRef.current.signal,
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const result: DetectionResult = await res.json();
+
+      setDrowsy(result.drowsy);
+      setConfidence(Math.round(result.confidence * 100));
+
+      if (result.drowsy && !showWarning) {
+        setShowWarning(true);
+        if (alarmEnabled) alarmRef.current.play();
+      } else if (!result.drowsy && showWarning) {
+        setShowWarning(false);
+        alarmRef.current.stop();
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError' && retry < MAX_RETRIES) {
+        setTimeout(() => sendToBackend(blob, retry + 1), RETRY_DELAY * (2 ** retry));
+      }
+    }
+  };
+
+  useEffect(() => {
+    return () => stopDetection();
+  }, [stopDetection]);
+
+  return (
+    <div className="w-full max-w-4xl mx-auto p-4 space-y-6">
+      {showWarning && (
+        <div className="fixed top-0 left-0 right-0 z-50">
+          <Alert className="rounded-none bg-destructive text-destructive-foreground animate-pulse">
+            <AlertTriangle className="h-6 w-6" />
+            <AlertDescription className="text-lg font-semibold flex justify-between items-center">
+              ⚠️ Drowsiness Detected – Please Take a Break!
+              <Button variant="outline" size="sm" onClick={() => setShowWarning(false)}>
+                Dismiss
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Camera className="h-5 w-5" />
+            Anti-Sleep Alert System For Drivers
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {error ? (
+            <div className="text-red-500">{error.message}</div>
+          ) : (
+            <>
+              <video ref={videoRef} autoPlay muted playsInline className="w-full max-h-[400px] object-cover rounded-lg border" />
+              <div className="flex justify-between items-center">
+                <span className="text-muted-foreground text-sm">Alertness: <Badge>{confidence}%</Badge></span>
+                <span className="text-muted-foreground text-sm">Status: <Badge variant={drowsy ? 'destructive' : 'default'}>{drowsy ? 'Drowsy' : 'Alert'}</Badge></span>
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={isActive ? stopDetection : initializeCamera} disabled={isProcessing}>
+                  {isProcessing ? 'Starting...' : isActive ? 'Stop' : 'Start'}
+                </Button>
+                <Button variant="outline" onClick={resetDetector}>Reset</Button>
+                <Button variant={alarmEnabled ? 'default' : 'outline'} size="sm" onClick={() => setAlarmEnabled(!alarmEnabled)}>
+                  <Volume2 className="h-4 w-4 mr-2" />
+                  Alarm {alarmEnabled ? 'On' : 'Off'}
+                </Button>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <canvas ref={canvasRef} className="hidden" width={CAPTURE_WIDTH} height={CAPTURE_HEIGHT} />
+      
+      {/* Instructions */}
+      <Card className="w-full">
+        <CardContent className="pt-6">
+          <div className="text-sm text-muted-foreground space-y-2">
+            <p><strong>Instructions:</strong></p>
+            <ul className="list-disc list-inside space-y-1">
+              <li>The system captures frames every second and analyzes them for drowsiness</li>
+              <li>A warning will appear if drowsiness is detected</li>
+              <li>The alarm sound can be toggled on/off using the button</li>
+              <li>Grant camera permissions when prompted</li>
+            </ul>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+export default DrowsinessDetector;
