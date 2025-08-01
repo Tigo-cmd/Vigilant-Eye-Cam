@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { AlertTriangle, Camera, RefreshCw, Volume2, Play, Pause } from 'lucide-react';
 
 // Configuration constants
-const BACKEND_URL = 'http://localhost:5000/detect';
+const BACKEND_URL = 'https://vigilant-eye-cam-api.onrender.com/detect';
 const CAPTURE_INTERVAL = 1000; // 1 second
 const CAPTURE_WIDTH = 320;
 const CAPTURE_HEIGHT = 240;
